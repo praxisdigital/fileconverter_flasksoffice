@@ -25,8 +25,7 @@
 defined('MOODLE_INTERNAL') || die();
 
 $plugin->component = 'fileconverter_flasksoffice'; // Full name of the plugin.
-$plugin->release = 2023090700;
-$plugin->version = 2023090700; // The current plugin version (Date: YYYYMMDDXX).
+$plugin->release = 2023090701;
+$plugin->version = 2023090701; // The current plugin version (Date: YYYYMMDDXX).
 $plugin->requires = 2022041900; // Requires this Moodle version.
 $plugin->maturity = MATURITY_STABLE;
-$plugin->supported = [400]; // A range of branch numbers of supported moodle versions.

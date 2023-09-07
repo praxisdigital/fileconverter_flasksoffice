@@ -23,12 +23,14 @@
  */
 namespace fileconverter_flasksoffice;
 
+use Psr\Log\LogLevel;
 use stored_file;
 use moodle_exception;
 use moodle_url;
 use coding_exception;
 use curl;
 use \core_files\conversion;
+use local_pxsdk\app\v10\factory as base_factory;
 
 /**
  * Class for converting files between different formats using flask rest server.
@@ -127,6 +129,10 @@ class converter implements \core_files\converter_interface {
      */
     public function start_document_conversion(\core_files\conversion $conversion) {
         global $CFG;
+        $factory = base_factory::make();
+
+        $index = $factory->logger()->index()->default_elasticsearch_logger_index(false);
+        $logger_repo = $factory->logger()->repository('elasticsearch', $index);
 
         $file = $conversion->get_sourcefile();
         $contenthash = $file->get_contenthash();
@@ -166,10 +172,10 @@ class converter implements \core_files\converter_interface {
         $filepath = $localpath ?? $remotepath;
         $type = '';
         $filename = $file->get_filename();
-        $contenthashf7 = substr($contenthash, 0, 7);
-        $data = array('file' => curl_file_create($filepath, $type, $contenthashf7.$filename));
-
+        $data = array('file' => curl_file_create($filepath, $type, $contenthash.$filename));
         $location = $this->baseurl . '/upload';
+
+        $logger_repo->log(LogLevel::INFO, 'Uploading file to converter', ['file' => $data]);
         $curl = curl_init();
         curl_setopt($curl, CURLOPT_URL, $location);
         curl_setopt($curl, CURLOPT_HTTPHEADER, array('Content-Type: multipart/form-data'));
@@ -202,6 +208,13 @@ class converter implements \core_files\converter_interface {
         if (!isset($json['result']['pdf']) || is_null($json)) {
             throw new coding_exception('Response was: '.$response);
         }
+        $logger_repo->log(LogLevel::INFO, 'File has been converted', ['file' => $json]);
+        $clean_filename = substr($filename, 0, strpos($filename, "."));
+
+        if (!strpos($json["result"]["pdf"], $contenthash.$clean_filename.'.pdf')) {
+            $logger_repo->log(LogLevel::CRITICAL, 'File has not been saved correctly, plausible data-leak could have happened', ['uploaded_file' => $data, 'response_file' => $json]);
+            throw new coding_exception('Error: The files has not been saved correctly!');
+        }
 
         $strarray = explode('/', $json['result']['pdf']);
         $lastelement = end($strarray);
@@ -212,7 +225,7 @@ class converter implements \core_files\converter_interface {
         $source = $sourceurl->out(false);
 
         $tmp = make_request_directory();
-        $downloadto = $tmp . '/' . ltrim($lastelement, $contenthashf7);
+        $downloadto = $tmp . '/' . ltrim($lastelement, $contenthash);
 
         $options = ['filepath' => $downloadto, 'timeout' => 15, 'followlocation' => true, 'maxredirs' => 5];
         $success = $client->download_one($source, null, $options);
