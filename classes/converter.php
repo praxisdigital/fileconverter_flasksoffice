@@ -173,7 +173,8 @@ class converter implements \core_files\converter_interface {
         $filepath = $localpath ?? $remotepath;
         $type = '';
         $filename = $file->get_filename();
-        $site_url = trim($CFG->wwwroot,'https://');
+        $domain = parse_url($CFG->wwwroot, PHP_URL_HOST);
+        $site_url = $domain ?: trim($CFG->wwwroot,'https://');
         $data = ['file' => curl_file_create($filepath, $type, $contenthash.$pathnamehash)];
         $location = $this->baseurl . '/upload?site='.$site_url;
 
