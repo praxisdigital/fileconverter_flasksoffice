@@ -23,6 +23,7 @@
  */
 namespace fileconverter_flasksoffice;
 
+use Psr\Log\LogLevel;
 use stored_file;
 use moodle_exception;
 use moodle_url;
@@ -118,6 +119,29 @@ class converter implements \core_files\converter_interface {
         return true;
     }
 
+    private function has_pxsdk_logger_installed(): bool {
+        return class_exists(\local_pxsdk\app\v10\logger\factory::class);
+    }
+
+    private function log_info(string $message, array $context): void {
+        if (!$this->has_pxsdk_logger_installed()) {
+            return;
+        }
+        $factory = \local_pxsdk\app\v10\factory::make();
+        $index = $factory->logger()->index()->default_elasticsearch_logger_index(false);
+        $logger_repo = $factory->logger()->repository('elasticsearch', $index);
+        $logger_repo->info($message, $context);
+    }
+
+    private function log_emergency(string $message, array $context): void {
+        if (!$this->has_pxsdk_logger_installed()) {
+            return;
+        }
+        $factory = \local_pxsdk\app\v10\factory::make();
+        $index = $factory->logger()->index()->default_elasticsearch_logger_index(false);
+        $logger_repo = $factory->logger()->repository('elasticsearch', $index);
+        $logger_repo->emergency($message, $context);
+    }
 
     /**
      * Convert a document to a new format and return a conversion object relating to the conversion in progress.
@@ -126,10 +150,11 @@ class converter implements \core_files\converter_interface {
      * @return  this
      */
     public function start_document_conversion(\core_files\conversion $conversion) {
-        global $CFG;
+        global $CFG, $SITE;
 
         $file = $conversion->get_sourcefile();
         $contenthash = $file->get_contenthash();
+        $pathnamehash = $file->get_pathnamehash();
 
         $originalname = $file->get_filename();
         if (strpos($originalname, '.') === false) {
@@ -166,10 +191,18 @@ class converter implements \core_files\converter_interface {
         $filepath = $localpath ?? $remotepath;
         $type = '';
         $filename = $file->get_filename();
-        $contenthashf7 = substr($contenthash, 0, 7);
-        $data = array('file' => curl_file_create($filepath, $type, $contenthashf7.$filename));
+        $domain = parse_url($CFG->wwwroot, PHP_URL_HOST);
+        $site_url = $domain ?: trim($CFG->wwwroot,'https://');
+        $data = ['file' => curl_file_create($filepath, $type, $contenthash.$pathnamehash)];
+        $location = $this->baseurl . '/upload?site='.$site_url;
 
-        $location = $this->baseurl . '/upload';
+        $this->log_info('Uploading file to converter',
+            [
+                'file' => $data,
+                'filename' => $filename,
+                'site_url' => $site_url,
+            ]
+        );
         $curl = curl_init();
         curl_setopt($curl, CURLOPT_URL, $location);
         curl_setopt($curl, CURLOPT_HTTPHEADER, array('Content-Type: multipart/form-data'));
@@ -203,22 +236,41 @@ class converter implements \core_files\converter_interface {
             throw new coding_exception('Response was: '.$response);
         }
 
+        $this->log_info('File has been converted', [
+            'file' => $json
+        ]);
+
+        if (!strpos($json["result"]["pdf"], $contenthash.$pathnamehash.'.pdf')) {
+            $this->log_emergency('File has not been saved correctly, plausible data-leak could have happened', [
+                'uploaded_file' => $data,
+                'response_file' => $json,
+                'site_url' => $site_url,
+            ]);
+            throw new coding_exception('Error: The files has not been saved correctly!');
+        }
+
         $strarray = explode('/', $json['result']['pdf']);
         $lastelement = end($strarray);
 
         // Download file from doc-server.
         $client = new curl();
-        $sourceurl = new moodle_url($this->baseurl . $json['result']['pdf']);
+        $sourceurl = new moodle_url($this->baseurl . $json['result']['pdf']. '?site='.$site_url);
         $source = $sourceurl->out(false);
 
         $tmp = make_request_directory();
-        $downloadto = $tmp . '/' . ltrim($lastelement, $contenthashf7);
+        $downloadto = $tmp . '/' . ltrim($lastelement, $contenthash);
 
         $options = ['filepath' => $downloadto, 'timeout' => 15, 'followlocation' => true, 'maxredirs' => 5];
         $success = $client->download_one($source, null, $options);
         if ($client->errno != 0) {
             throw new coding_exception($client->error, $client->errno);
         }
+
+        $this->log_info('Downloaded file from converter', [
+            'source' => $source,
+            'filepath' => $downloadto,
+        ]);
+
         if ($success) {
             $conversion->store_destfile_from_path($downloadto);
             $conversion->set('status', conversion::STATUS_COMPLETE);
