@@ -30,7 +30,6 @@ use moodle_url;
 use coding_exception;
 use curl;
 use \core_files\conversion;
-use local_pxsdk\app\v10\factory as base_factory;
 
 /**
  * Class for converting files between different formats using flask rest server.
@@ -120,6 +119,10 @@ class converter implements \core_files\converter_interface {
         return true;
     }
 
+    private function has_pxsdk_logger_installed(): bool {
+        return class_exists(\local_pxsdk\app\v10\logger\factory::class);
+    }
+
 
     /**
      * Convert a document to a new format and return a conversion object relating to the conversion in progress.
@@ -129,10 +132,14 @@ class converter implements \core_files\converter_interface {
      */
     public function start_document_conversion(\core_files\conversion $conversion) {
         global $CFG, $SITE;
-        $factory = base_factory::make();
+        $logger_installed = $this->has_pxsdk_logger_installed();
 
-        $index = $factory->logger()->index()->default_elasticsearch_logger_index(false);
-        $logger_repo = $factory->logger()->repository('elasticsearch', $index);
+        if ($logger_installed) {
+            $factory = \local_pxsdk\app\v10\factory::make();
+
+            $index = $factory->logger()->index()->default_elasticsearch_logger_index(false);
+            $logger_repo = $factory->logger()->repository('elasticsearch', $index);
+        }
 
         $file = $conversion->get_sourcefile();
         $contenthash = $file->get_contenthash();
@@ -178,12 +185,15 @@ class converter implements \core_files\converter_interface {
         $data = ['file' => curl_file_create($filepath, $type, $contenthash.$pathnamehash)];
         $location = $this->baseurl . '/upload?site='.$site_url;
 
-        $logger_repo->info('Uploading file to converter',
-            [
-                'file' => $data,
-                'filename' => $filename,
-                'site_url' => $site_url,
-            ]);
+        if ($logger_installed) {
+            $logger_repo->info('Uploading file to converter',
+                [
+                    'file' => $data,
+                    'filename' => $filename,
+                    'site_url' => $site_url,
+                ]
+            );
+        }
         $curl = curl_init();
         curl_setopt($curl, CURLOPT_URL, $location);
         curl_setopt($curl, CURLOPT_HTTPHEADER, array('Content-Type: multipart/form-data'));
@@ -216,16 +226,21 @@ class converter implements \core_files\converter_interface {
         if (!isset($json['result']['pdf']) || is_null($json)) {
             throw new coding_exception('Response was: '.$response);
         }
-        $logger_repo->info('File has been converted', [
-            'file' => $json
-        ]);
+
+        if ($logger_installed) {
+            $logger_repo->info('File has been converted', [
+                'file' => $json
+            ]);
+        }
 
         if (!strpos($json["result"]["pdf"], $contenthash.$pathnamehash.'.pdf')) {
-            $logger_repo->emergency('File has not been saved correctly, plausible data-leak could have happened', [
-                'uploaded_file' => $data,
-                'response_file' => $json,
-                'site_url' => $site_url,
-            ]);
+            if ($logger_installed) {
+                $logger_repo->emergency('File has not been saved correctly, plausible data-leak could have happened', [
+                    'uploaded_file' => $data,
+                    'response_file' => $json,
+                    'site_url' => $site_url,
+                ]);
+            }
             throw new coding_exception('Error: The files has not been saved correctly!');
         }
 
@@ -246,10 +261,12 @@ class converter implements \core_files\converter_interface {
             throw new coding_exception($client->error, $client->errno);
         }
 
-        $logger_repo->info('Downloading file from converter', [
-            'source' => $source,
-            'filepath' => $downloadto,
-        ]);
+        if ($logger_installed) {
+            $logger_repo->info('Downloading file from converter', [
+                'source' => $source,
+                'filepath' => $downloadto,
+            ]);
+        }
 
         if ($success) {
             $conversion->store_destfile_from_path($downloadto);
