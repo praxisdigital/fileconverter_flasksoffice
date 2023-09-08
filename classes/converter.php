@@ -123,6 +123,25 @@ class converter implements \core_files\converter_interface {
         return class_exists(\local_pxsdk\app\v10\logger\factory::class);
     }
 
+    private function log_info(string $message, array $context): void {
+        if (!$this->has_pxsdk_logger_installed()) {
+            return;
+        }
+        $factory = \local_pxsdk\app\v10\factory::make();
+        $index = $factory->logger()->index()->default_elasticsearch_logger_index(false);
+        $logger_repo = $factory->logger()->repository('elasticsearch', $index);
+        $logger_repo->info($message, $context);
+    }
+
+    private function log_emergency(string $message, array $context): void {
+        if (!$this->has_pxsdk_logger_installed()) {
+            return;
+        }
+        $factory = \local_pxsdk\app\v10\factory::make();
+        $index = $factory->logger()->index()->default_elasticsearch_logger_index(false);
+        $logger_repo = $factory->logger()->repository('elasticsearch', $index);
+        $logger_repo->emergency($message, $context);
+    }
 
     /**
      * Convert a document to a new format and return a conversion object relating to the conversion in progress.
@@ -132,14 +151,6 @@ class converter implements \core_files\converter_interface {
      */
     public function start_document_conversion(\core_files\conversion $conversion) {
         global $CFG, $SITE;
-        $logger_installed = $this->has_pxsdk_logger_installed();
-
-        if ($logger_installed) {
-            $factory = \local_pxsdk\app\v10\factory::make();
-
-            $index = $factory->logger()->index()->default_elasticsearch_logger_index(false);
-            $logger_repo = $factory->logger()->repository('elasticsearch', $index);
-        }
 
         $file = $conversion->get_sourcefile();
         $contenthash = $file->get_contenthash();
@@ -185,15 +196,13 @@ class converter implements \core_files\converter_interface {
         $data = ['file' => curl_file_create($filepath, $type, $contenthash.$pathnamehash)];
         $location = $this->baseurl . '/upload?site='.$site_url;
 
-        if ($logger_installed) {
-            $logger_repo->info('Uploading file to converter',
-                [
-                    'file' => $data,
-                    'filename' => $filename,
-                    'site_url' => $site_url,
-                ]
-            );
-        }
+        $this->log_info('Uploading file to converter',
+            [
+                'file' => $data,
+                'filename' => $filename,
+                'site_url' => $site_url,
+            ]
+        );
         $curl = curl_init();
         curl_setopt($curl, CURLOPT_URL, $location);
         curl_setopt($curl, CURLOPT_HTTPHEADER, array('Content-Type: multipart/form-data'));
@@ -227,20 +236,16 @@ class converter implements \core_files\converter_interface {
             throw new coding_exception('Response was: '.$response);
         }
 
-        if ($logger_installed) {
-            $logger_repo->info('File has been converted', [
-                'file' => $json
-            ]);
-        }
+        $this->log_info('File has been converted', [
+            'file' => $json
+        ]);
 
         if (!strpos($json["result"]["pdf"], $contenthash.$pathnamehash.'.pdf')) {
-            if ($logger_installed) {
-                $logger_repo->emergency('File has not been saved correctly, plausible data-leak could have happened', [
-                    'uploaded_file' => $data,
-                    'response_file' => $json,
-                    'site_url' => $site_url,
-                ]);
-            }
+            $this->log_emergency('File has not been saved correctly, plausible data-leak could have happened', [
+                'uploaded_file' => $data,
+                'response_file' => $json,
+                'site_url' => $site_url,
+            ]);
             throw new coding_exception('Error: The files has not been saved correctly!');
         }
 
@@ -261,12 +266,10 @@ class converter implements \core_files\converter_interface {
             throw new coding_exception($client->error, $client->errno);
         }
 
-        if ($logger_installed) {
-            $logger_repo->info('Downloading file from converter', [
-                'source' => $source,
-                'filepath' => $downloadto,
-            ]);
-        }
+        $this->log_info('Downloaded file from converter', [
+            'source' => $source,
+            'filepath' => $downloadto,
+        ]);
 
         if ($success) {
             $conversion->store_destfile_from_path($downloadto);
