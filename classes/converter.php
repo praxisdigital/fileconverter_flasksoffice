@@ -150,7 +150,7 @@ class converter implements \core_files\converter_interface {
      * @return  this
      */
     public function start_document_conversion(\core_files\conversion $conversion) {
-        global $CFG, $SITE;
+        global $CFG;
 
         $file = $conversion->get_sourcefile();
         $contenthash = $file->get_contenthash();
@@ -195,12 +195,16 @@ class converter implements \core_files\converter_interface {
         $site_url = $domain ?: trim($CFG->wwwroot,'https://');
         $data = ['file' => curl_file_create($filepath, $type, $contenthash.$pathnamehash)];
         $location = $this->baseurl . '/upload?site='.$site_url;
+        $unique_id = uniqid('flasksoffice_converter_', true);
 
-        $this->log_info('Uploading file to converter',
+        $this->log_info('(1/3) Uploading file to converter',
             [
                 'file' => $data,
                 'filename' => $filename,
-                'site_url' => $site_url,
+                'contenthash' => $contenthash,
+                'pathnamehash' => $pathnamehash,
+                'site' => $site_url,
+                'uid' => $unique_id,
             ]
         );
         $curl = curl_init();
@@ -236,15 +240,23 @@ class converter implements \core_files\converter_interface {
             throw new coding_exception('Response was: '.$response);
         }
 
-        $this->log_info('File has been converted', [
-            'file' => $json
+        $this->log_info('(2/3) File has been converted', [
+            'file' => $json,
+            'filename' => $filename,
+            'contenthash' => $contenthash,
+            'pathnamehash' => $pathnamehash,
+            'site' => $site_url,
+            'uid' => $unique_id,
         ]);
 
         if (!strpos($json["result"]["pdf"], $contenthash.$pathnamehash.'.pdf')) {
-            $this->log_emergency('File has not been saved correctly, plausible data-leak could have happened', [
+            $this->log_emergency('(3/3) File has not been saved correctly, plausible data-leak could have happened', [
                 'uploaded_file' => $data,
+                'uploaded_file_contenthash' => $contenthash,
+                'uploaded_file_pathnamehash' => $pathnamehash,
                 'response_file' => $json,
-                'site_url' => $site_url,
+                'site' => $site_url,
+                'uid' => $unique_id,
             ]);
             throw new coding_exception('Error: The files has not been saved correctly!');
         }
@@ -266,9 +278,13 @@ class converter implements \core_files\converter_interface {
             throw new coding_exception($client->error, $client->errno);
         }
 
-        $this->log_info('Downloaded file from converter', [
+        $this->log_info('(3/3) Downloaded file from converter', [
             'source' => $source,
             'filepath' => $downloadto,
+            'contenthash' => $contenthash,
+            'pathnamehash' => $pathnamehash,
+            'site' => $site_url,
+            'uid' => $unique_id,
         ]);
 
         if ($success) {
