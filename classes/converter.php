@@ -23,9 +23,11 @@
  */
 namespace fileconverter_flasksoffice;
 
-use Psr\Log\LogLevel;
+use fileconverter_flasksoffice\event\conversion_download;
+use fileconverter_flasksoffice\event\conversion_file_is_converted;
+use fileconverter_flasksoffice\event\conversion_process_error;
+use fileconverter_flasksoffice\event\conversion_upload;
 use stored_file;
-use moodle_exception;
 use moodle_url;
 use coding_exception;
 use curl;
@@ -119,30 +121,6 @@ class converter implements \core_files\converter_interface {
         return true;
     }
 
-    private function has_pxsdk_logger_installed(): bool {
-        return class_exists(\local_pxsdk\app\v10\logger\factory::class);
-    }
-
-    private function log_info(string $message, array $context): void {
-        if (!$this->has_pxsdk_logger_installed()) {
-            return;
-        }
-        $factory = \local_pxsdk\app\v10\factory::make();
-        $index = $factory->logger()->index()->default_elasticsearch_logger_index(false);
-        $logger_repo = $factory->logger()->repository('elasticsearch', $index);
-        $logger_repo->info($message, $context);
-    }
-
-    private function log_emergency(string $message, array $context): void {
-        if (!$this->has_pxsdk_logger_installed()) {
-            return;
-        }
-        $factory = \local_pxsdk\app\v10\factory::make();
-        $index = $factory->logger()->index()->default_elasticsearch_logger_index(false);
-        $logger_repo = $factory->logger()->repository('elasticsearch', $index);
-        $logger_repo->emergency($message, $context);
-    }
-
     /**
      * Convert a document to a new format and return a conversion object relating to the conversion in progress.
      *
@@ -195,18 +173,19 @@ class converter implements \core_files\converter_interface {
         $site_url = $domain ?: trim($CFG->wwwroot,'https://');
         $data = ['file' => curl_file_create($filepath, $type, $contenthash.$pathnamehash)];
         $location = $this->baseurl . '/upload?site='.$site_url;
-        $unique_id = uniqid('flasksoffice_converter_', true);
 
-        $this->log_info('(1/3) Uploading file to converter',
-            [
-                'file' => $data,
-                'filename' => $filename,
-                'contenthash' => $contenthash,
-                'pathnamehash' => $pathnamehash,
-                'site' => $site_url,
-                'uid' => $unique_id,
-            ]
-        );
+        $log_context = [
+            'filename' => $filename,
+            'contenthash' => $contenthash,
+            'pathnamehash' => $pathnamehash,
+        ];
+
+        conversion_upload::create_by_progress(
+            'Uploading file to converter',
+            $conversion,
+            $log_context
+        )->trigger();
+
         $curl = curl_init();
         curl_setopt($curl, CURLOPT_URL, $location);
         curl_setopt($curl, CURLOPT_HTTPHEADER, array('Content-Type: multipart/form-data'));
@@ -240,24 +219,24 @@ class converter implements \core_files\converter_interface {
             throw new coding_exception('Response was: '.$response);
         }
 
-        $this->log_info('(2/3) File has been converted', [
-            'file' => $json,
-            'filename' => $filename,
-            'contenthash' => $contenthash,
-            'pathnamehash' => $pathnamehash,
-            'site' => $site_url,
-            'uid' => $unique_id,
-        ]);
+        conversion_file_is_converted::create_by_progress(
+            'File has been converted',
+            $conversion,
+            $log_context
+        )->trigger();
 
         if (!strpos($json["result"]["pdf"], $contenthash.$pathnamehash.'.pdf')) {
-            $this->log_emergency('(3/3) File has not been saved correctly, plausible data-leak could have happened', [
-                'uploaded_file' => $data,
-                'uploaded_file_contenthash' => $contenthash,
-                'uploaded_file_pathnamehash' => $pathnamehash,
-                'response_file' => $json,
-                'site' => $site_url,
-                'uid' => $unique_id,
-            ]);
+            conversion_process_error::create_by_progress(
+                'File has not been saved correctly, plausible data-leak could have happened',
+                $conversion,
+                [
+                    'uploaded_file' => $data,
+                    'uploaded_file_contenthash' => $contenthash,
+                    'uploaded_file_pathnamehash' => $pathnamehash,
+                    'response_file' => $json,
+                ]
+            )->trigger();
+
             throw new coding_exception('Error: The files has not been saved correctly!');
         }
 
@@ -278,15 +257,6 @@ class converter implements \core_files\converter_interface {
             throw new coding_exception($client->error, $client->errno);
         }
 
-        $this->log_info('(3/3) Downloaded file from converter', [
-            'source' => $source,
-            'filepath' => $downloadto,
-            'contenthash' => $contenthash,
-            'pathnamehash' => $pathnamehash,
-            'site' => $site_url,
-            'uid' => $unique_id,
-        ]);
-
         if ($success) {
             $conversion->store_destfile_from_path($downloadto);
             $conversion->set('status', conversion::STATUS_COMPLETE);
@@ -294,6 +264,17 @@ class converter implements \core_files\converter_interface {
         } else {
             $conversion->set('status', conversion::STATUS_FAILED);
         }
+
+        conversion_download::create_by_progress(
+            'Downloaded file from converter',
+            $conversion,
+            [
+                'source' => $source,
+                'filepath' => $downloadto,
+                'contenthash' => $contenthash,
+                'pathnamehash' => $pathnamehash,
+            ]
+        )->trigger();
 
         // Trigger event.
         list($context, $course, $cm) = get_context_info_array($file->get_contextid());
