@@ -2,8 +2,8 @@
 
 namespace fileconverter_flasksoffice\event;
 
-use core\context;
-use core\context\system as context_system;
+use context;
+use context_system;
 use core\event\base;
 use core_files\conversion;
 
