@@ -3,8 +3,8 @@
 namespace fileconverter_flasksoffice\event;
 
 use core\event\base;
-use local_pxsdk\app\v13\factory;
-use local_pxsdk\app\v13\logger\interfaces\logger;
+use local_pxsdk\app\v16\factory;
+use local_pxsdk\app\v16\logger\interfaces\logger;
 
 // @codeCoverageIgnoreStart
 defined('MOODLE_INTERNAL') || die();
@@ -81,7 +81,7 @@ class conversion_observer
     private static function get_logger(): logger
     {
         if (self::$logger === null) {
-            self::$logger = factory::make()->logger()->elasticsearch()->logger();
+            self::$logger = factory::make()->logger()->datadog()->logger();
             self::$logger->set_preset_context([
                 'site' => self::get_host(),
                 'component' => 'fileconverter_flasksoffice',
@@ -114,8 +114,7 @@ class conversion_observer
     private static function is_loggable(base $event): bool
     {
         return self::is_sdk_installed()
-            && self::has_log_context($event)
-            && factory::make()->sdk_admin_settings()->logger_elasticsearch_enabled();
+            && self::has_log_context($event);
     }
 
     private static function log_info(array $context): void
