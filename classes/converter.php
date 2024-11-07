@@ -131,9 +131,9 @@ class converter implements \core_files\converter_interface
      * Convert a document to a new format and return a conversion object relating to the conversion in progress.
      *
      * @param \core_files\conversion $conversion The file to be converted
-     * @return  this
+     * @return self
      */
-    public function start_document_conversion(\core_files\conversion $conversion)
+    public function start_document_conversion(\core_files\conversion $conversion): static
     {
         global $CFG;
 
@@ -174,7 +174,7 @@ class converter implements \core_files\converter_interface
         curl_setopt($curl, CURLOPT_TIMEOUT, 10);
         $fserverrespond = curl_exec($curl);
         curl_close($curl);
-        if ($fserverrespond != 'OK') {
+        if ($fserverrespond !== 'OK') {
             throw new coding_exception('The document conversion server is not accessible at the URL ' . $location);
         }
 
@@ -203,7 +203,6 @@ class converter implements \core_files\converter_interface
         $data = ['file' => curl_file_create($filepath, $type, $contenthash . $pathnamehash)];
         $location = $this->baseurl . '/upload?site=' . $site_url;
 
-
         conversion_upload::create_by_progress(
             'Uploading file to converter',
             $conversion,
@@ -225,24 +224,27 @@ class converter implements \core_files\converter_interface
         }
         curl_close($curl);
         if (isset($errormsg)) {
-            throw new coding_exception($errormsg);
+            throw new coding_exception('Curl error: ' . $errormsg);
         }
 
         $json = json_decode($response, true);
         if (!empty($json->error)) {
             throw new coding_exception(
-                $json->error->code . ': ' . $json->error->message . '. Response was: ' . $response
+                'JSON error: ' . $json->error->code . ': ' . $json->error->message . '. Response was: ' . $response
             );
         }
+
         if (isset($json['result']['doc-conv-failed'])) {
-            if ($json['result']['doc-conv-failed'] == 'TimeoutExpired') {
-                $conversion->set('status', conversion::STATUS_FAILED);
-                $conversion->update();
-                return $this;
-            }
+            mtrace(
+                "Flasksoffice conversion for '" . $filepath . "' failed. Setting conversion status to failed."
+            );
+            $conversion->set('status', conversion::STATUS_FAILED);
+            $conversion->update();
+            return $this;
         }
+
         if (!isset($json['result']['pdf']) || is_null($json)) {
-            throw new coding_exception('Response was: ' . $response);
+            throw new coding_exception('No pdf in json result. Response was: ' . $response);
         }
 
         conversion_file_is_converted::create_by_progress(
