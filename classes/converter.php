@@ -235,7 +235,7 @@ class converter implements \core_files\converter_interface
         }
 
         if (isset($json['result']['doc-conv-failed'])) {
-            error_log(
+            mtrace(
                 "Flasksoffice conversion for '" . $filepath . "' failed. Setting conversion status to failed."
             );
             $conversion->set('status', conversion::STATUS_FAILED);
