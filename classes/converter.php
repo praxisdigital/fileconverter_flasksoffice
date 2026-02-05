@@ -21,12 +21,16 @@
  * @copyright  2020 Mirko Otto
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
+
 namespace fileconverter_flasksoffice;
 
+use fileconverter_flasksoffice\event\conversion_download;
+use fileconverter_flasksoffice\event\conversion_file_exceeds_size_limit;
+use fileconverter_flasksoffice\event\conversion_file_is_converted;
+use fileconverter_flasksoffice\event\conversion_process_error;
+use fileconverter_flasksoffice\event\conversion_upload;
 use stored_file;
-use moodle_exception;
 use moodle_url;
-use core\url;
 use coding_exception;
 use curl;
 use core_files\conversion;
@@ -38,7 +42,8 @@ use core_files\conversion;
  * @copyright  2020 Mirko Otto
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
-class converter implements \core_files\converter_interface {
+class converter implements \core_files\converter_interface
+{
     /** @var array $imports List of supported import file formats */
     private static $imports = [
         // Document file formats.
@@ -87,7 +92,8 @@ class converter implements \core_files\converter_interface {
     /**
      * Class constructor
      */
-    public function __construct() {
+    public function __construct()
+    {
         $this->config = get_config('fileconverter_flasksoffice');
 
         if ($this->baseurl == null) {
@@ -101,7 +107,8 @@ class converter implements \core_files\converter_interface {
      * @param \fileconverter_flasksoffice\converter $converter
      * @return boolean $isset Is all configuration options set.
      */
-    private static function is_config_set(\fileconverter_flasksoffice\converter $converter) {
+    private static function is_config_set(\fileconverter_flasksoffice\converter $converter)
+    {
         $iscorrect = true;
 
         if (empty($converter->config->flasksofficeurl)) {
@@ -116,7 +123,8 @@ class converter implements \core_files\converter_interface {
      *
      * @return  bool
      */
-    public static function are_requirements_met() {
+    public static function are_requirements_met()
+    {
         $converter = new \fileconverter_flasksoffice\converter();
 
         // First check that we have the basic configuration settings set.
@@ -141,7 +149,7 @@ class converter implements \core_files\converter_interface {
         curl_setopt($curl, CURLOPT_TIMEOUT, 10);
         $fserverrespond = curl_exec($curl);
         curl_close($curl);
-        if ($fserverrespond != 'OK') {
+        if ($fserverrespond !== 'OK') {
             throw new \Exception(get_string('missingconversionserver', 'fileconverter_flasksoffice', $location));
         }
     }
@@ -150,13 +158,23 @@ class converter implements \core_files\converter_interface {
      * Upload the file and convert it on the conversion server.
      *
      * @param stored_file $filetobeconverted File to be converted
-     * @param string $ch7 First seven characters of the file object contenthash.
+     * @param string $contenthash First seven characters of the file object contenthash.
+     * @param \core_files\conversion $conversion The file to be converted
+     * @param string $site_url
      *
      * @return string
      * @throws \Exception
      */
-    private function upload_convert_file($filetobeconverted, $ch7) {
+    private function upload_convert_file($filetobeconverted, $contenthash, $conversion, $site_url) {
         $originalname = $filetobeconverted->get_filename();
+        $pathnamehash = $filetobeconverted->get_pathnamehash();
+
+        $log_context = [
+            'filename' => $originalname,
+            'contenthash' => $contenthash,
+            'pathnamehash' => $pathnamehash,
+        ];
+
         if (strpos($originalname, '.') === false) {
             throw new \Exception(get_string('missingfileextension', 'fileconverter_flasksoffice'));
         }
@@ -174,12 +192,31 @@ class converter implements \core_files\converter_interface {
             throw new \Exception(get_string('missingfilepath', 'fileconverter_flasksoffice'));
         }
 
+        if ($filesystem->is_file_readable_locally_by_storedfile($filetobeconverted)) {
+            $localpath = $filesystem->get_local_path_from_storedfile($filetobeconverted);
+        } else {
+            if ($filesystem->is_file_readable_remotely_by_storedfile($filetobeconverted)) {
+                $remotepath = $filesystem->get_remote_path_from_storedfile($filetobeconverted);
+            } else {
+                if ($filesystem->is_file_readable_locally_by_storedfile($filetobeconverted, true)) {
+                    $localpath = $filesystem->get_local_path_from_storedfile($filetobeconverted, true);
+                } else {
+                    throw new \Exception(get_string('missingfilepath', 'fileconverter_flasksoffice'));
+                }
+            }
+        }
+
         $filepath = $localpath ?? $remotepath;
         $type = '';
-        $filename = $originalname;
-        $data = ['file' => curl_file_create($filepath, $type, $ch7 . $filename)];
+        $data = ['file' => curl_file_create($filepath, $type, $contenthash . $pathnamehash)];
+        $location = $this->baseurl . '/upload?site=' . $site_url;
 
-        $location = $this->baseurl . '/upload';
+        conversion_upload::create_by_progress(
+            'Uploading file to converter',
+            $conversion,
+            $log_context
+        )->trigger();
+
         $curl = curl_init();
         curl_setopt($curl, CURLOPT_URL, $location);
         curl_setopt($curl, CURLOPT_HTTPHEADER, ['Content-Type: multipart/form-data']);
@@ -212,6 +249,27 @@ class converter implements \core_files\converter_interface {
             throw new \Exception(get_string('conversionfailed', 'fileconverter_flasksoffice', $response));
         }
 
+        conversion_file_is_converted::create_by_progress(
+            'File has been converted',
+            $conversion,
+            $log_context
+        )->trigger();
+
+        if (!strpos($json["result"]["pdf"], $contenthash . $pathnamehash . '.pdf')) {
+            conversion_process_error::create_by_progress(
+                'File has not been saved correctly, plausible data-leak could have happened',
+                $conversion,
+                [
+                    'uploaded_file' => $data,
+                    'uploaded_file_contenthash' => $contenthash,
+                    'uploaded_file_pathnamehash' => $pathnamehash,
+                    'response_file' => $json,
+                ]
+            )->trigger();
+
+            throw new coding_exception('Error: The files has not been saved correctly!');
+        }
+
         return $json['result']['pdf'];
     }
 
@@ -219,16 +277,13 @@ class converter implements \core_files\converter_interface {
     /**
      * Download a converted file to a local destination
      *
-     * @param string $jsonfile Remote file location
+     * @param string $source Url
      * @param string $downloadto Location to store downloaded file locally
      *
      * @throws \Exception
      */
-    private function download_converted_file($jsonfile, $downloadto) {
+    private function download_converted_file($source, $downloadto) {
         $client = new curl();
-        $sourceurl = new moodle_url($this->baseurl . $jsonfile);
-        $source = $sourceurl->out(false);
-
         $options = ['filepath' => $downloadto, 'timeout' => 15, 'followlocation' => true, 'maxredirs' => 5];
         $success = $client->download_one($source, null, $options);
         if ($client->errno != 0) {
@@ -241,32 +296,71 @@ class converter implements \core_files\converter_interface {
      *
      * @param \core_files\conversion $conversion The file to be converted
      *
-     * @return this
+     * @return self
      */
-    public function start_document_conversion(\core_files\conversion $conversion) {
+    public function start_document_conversion(\core_files\conversion $conversion)
+    {
         $file = $conversion->get_sourcefile();
+        $originalname = $file->get_filename();
         $contenthash = $file->get_contenthash();
-        $contenthashf7 = substr($contenthash, 0, 7);
+        $pathnamehash = $file->get_pathnamehash();
+
+        $log_context = [
+            'filename' => $originalname,
+            'contenthash' => $contenthash,
+            'pathnamehash' => $pathnamehash,
+        ];
+
+        $max_file_size = 1024 * 1024 * 30; // 30 MB
+
+        if ($file->get_filesize() > $max_file_size) {
+            $conversion->set('status', conversion::STATUS_FAILED);
+            $conversion->update();
+            conversion_file_exceeds_size_limit::create_by_progress(
+                'File exceeds max file size of 30 MB, aborting conversion',
+                $conversion,
+                $log_context
+            )->trigger();
+            return $this;
+        }
 
         try {
             // Check if the conversion server is available.
             $this->check_conversion_server();
 
+            global $CFG;
+            $domain = parse_url($CFG->wwwroot, PHP_URL_HOST);
+            $site_url = $domain ?: trim($CFG->wwwroot, 'https://');
+
             // Upload the file and convert it on the conversion server.
-            $jsonpdf = $this->upload_convert_file($file, $contenthashf7);
+            $jsonpdf = $this->upload_convert_file($file, $contenthash, $conversion, $site_url);
 
             // Extract filename and create downloadto file.
             $strarray = explode('/', $jsonpdf);
             $lastelement = end($strarray);
             $tmp = make_request_directory();
-            $downloadto = $tmp . '/' . ltrim($lastelement, $contenthashf7);
+            $downloadto = $tmp . '/' . ltrim($lastelement, $contenthash);
+
+            $sourceurl = new moodle_url($this->baseurl . $jsonpdf . '?site=' . $site_url);
+            $source = $sourceurl->out(false);
 
             // Download the converted file from conversion server.
-            $this->download_converted_file($jsonpdf, $downloadto);
+            $this->download_converted_file($source, $downloadto);
 
             $conversion->store_destfile_from_path($downloadto);
             $conversion->set('status', conversion::STATUS_COMPLETE);
             $conversion->update();
+
+            conversion_download::create_by_progress(
+                'Downloaded file from converter',
+                $conversion,
+                [
+                    'source' => $source,
+                    'filepath' => $downloadto,
+                    'contenthash' => $contenthash,
+                    'pathnamehash' => $pathnamehash,
+                ]
+            )->trigger();
         } catch (\Exception $e) {
             $conversion->set('status', conversion::STATUS_FAILED);
             $conversion->set('statusmessage', $e->getMessage());
@@ -283,7 +377,8 @@ class converter implements \core_files\converter_interface {
                         'targetformat' => $conversion->get('targetformat'),
                         'id' => $conversion->get('id'),
                         'status' => $conversion->get('status'),
-                    ]];
+                    ]
+                ];
                 $event = \fileconverter_flasksoffice\event\document_conversion::create($eventinfo);
                 $event->trigger();
             }
@@ -297,7 +392,8 @@ class converter implements \core_files\converter_interface {
      * @param   conversion $conversion The file to be converted
      * @return  $this;
      */
-    public function poll_conversion_status(conversion $conversion) {
+    public function poll_conversion_status(conversion $conversion)
+    {
         // If conversion is complete or failed return early.
         if ($conversion->get('status') == conversion::STATUS_COMPLETE
             || $conversion->get('status') == conversion::STATUS_FAILED) {
@@ -311,7 +407,8 @@ class converter implements \core_files\converter_interface {
      *
      * @return  stored_file
      */
-    public function serve_test_document() {
+    public function serve_test_document()
+    {
         global $CFG;
         require_once($CFG->libdir . '/filelib.php');
 
@@ -328,16 +425,26 @@ class converter implements \core_files\converter_interface {
 
         // Get the fixture doc file content and generate and stored_file object.
         $fs = get_file_storage();
-        $testdocx = $fs->get_file($filerecord['contextid'], $filerecord['component'], $filerecord['filearea'], $filerecord['itemid'], $filerecord['filepath'], $filerecord['filename']);
+        $testdocx = $fs->get_file(
+            $filerecord['contextid'],
+            $filerecord['component'],
+            $filerecord['filearea'],
+            $filerecord['itemid'],
+            $filerecord['filepath'],
+            $filerecord['filename']
+        );
 
         if (!$testdocx) {
             $fixturefile = dirname(__DIR__) . '/tests/fixtures/source.docx';
             $testdocx = $fs->create_file_from_pathname($filerecord, $fixturefile);
         }
 
-        $conversion = new \core_files\conversion(0, (object) [
-            'targetformat' => 'pdf',
-        ]);
+        $conversion = new \core_files\conversion(
+            0,
+            (object)[
+                'targetformat' => 'pdf',
+            ]
+        );
 
         $conversion->set_sourcefile($testdocx);
         $conversion->create();
@@ -359,7 +466,8 @@ class converter implements \core_files\converter_interface {
      * @param   string $to The destination type
      * @return  bool
      */
-    public static function supports($from, $to) {
+    public static function supports($from, $to)
+    {
         // This is not a one-liner because of php 5.6.
         $imports = self::$imports;
         $exports = self::$exports;
@@ -371,16 +479,35 @@ class converter implements \core_files\converter_interface {
      *
      * @return  string
      */
-    public function get_supported_conversions() {
+    public function get_supported_conversions()
+    {
         $conversions = [
             // Document file formats.
-            'doc', 'docx', 'rtf', 'odt', 'html', 'txt',
+            'doc',
+            'docx',
+            'rtf',
+            'odt',
+            'html',
+            'txt',
             // Spreadsheet file formats.
-            'xls', 'xlsx', 'ods', 'csv',
+            'xls',
+            'xlsx',
+            'ods',
+            'csv',
             // Presentation file formats.
-            'ppt', 'pptx', 'odp',
+            'ppt',
+            'pptx',
+            'odp',
             // Image file formats.
-            'jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'tif', 'svg', 'webp',
+            'jpg',
+            'jpeg',
+            'png',
+            'gif',
+            'bmp',
+            'tiff',
+            'tif',
+            'svg',
+            'webp',
         ];
         return implode(', ', $conversions);
     }
