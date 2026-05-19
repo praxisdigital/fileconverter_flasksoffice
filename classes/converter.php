@@ -148,7 +148,7 @@ class converter implements \core_files\converter_interface
         curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($curl, CURLOPT_TIMEOUT, 10);
         $fserverrespond = curl_exec($curl);
-        curl_close($curl);
+
         if ($fserverrespond !== 'OK') {
             throw new \Exception(get_string('missingconversionserver', 'fileconverter_flasksoffice', $location));
         }
@@ -231,7 +231,6 @@ class converter implements \core_files\converter_interface
             $errormsg = curl_error($curl);
             throw new \Exception(get_string('curlerrno', 'fileconverter_flasksoffice', $errormsg));
         }
-        curl_close($curl);
 
         $json = json_decode($response, true);
         if (!empty($json->error)) {
